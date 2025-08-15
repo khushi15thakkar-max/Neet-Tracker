@@ -2,20 +2,6 @@
 A personal NEET 2027 preparation dashboard with countdown, planner, syllabus tracker, backlog manager, and analytic
 import React, { useEffect, useMemo, useState } from "react";
 
-/*
-NEET 2027 Dashboard — v2 (Mobile-first)
-Add-ons requested:
-- Exam date fixed to 4 June 2027
-- 6 subjects: Physics, Botany, Zoology, Physical Chem, Organic Chem, Inorganic Chem
-- Syllabus from screenshot (biology topics duplicated under Botany & Zoology)
-- Per-chapter 100% checklist: Lecture+Notes, NCERT (Solved+Back), DPP, Module, Extra Book
-  (Extra Book = S.L. Arora for Physics; Pradeep's Chemistry for Chem subjects)
-- Backlog list per subject
-- Subject progress bars + totals
-- Countdown, Planner, Mock Tracker, Habits, Analytics retained
-- All data stored locally (browser localStorage)
-*/
-
 // --- Utilities ---
 const fmt = (n) => new Intl.NumberFormat("en-IN").format(n);
 const todayStr = () => new Date().toISOString().slice(0, 10);
