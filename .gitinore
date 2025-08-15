@@ -1,3 +1,430 @@
-node_modules
-dist
-.env
+import React, { useEffect, useMemo, useState } from "react";
+
+/*
+NEET 2027 Dashboard — v2 (Mobile-first)
+Add-ons requested:
+- Exam date fixed to 4 June 2027
+- 6 subjects: Physics, Botany, Zoology, Physical Chem, Organic Chem, Inorganic Chem
+- Syllabus from screenshot (biology topics duplicated under Botany & Zoology)
+- Per-chapter 100% checklist: Lecture+Notes, NCERT (Solved+Back), DPP, Module, Extra Book
+  (Extra Book = S.L. Arora for Physics; Pradeep's Chemistry for Chem subjects)
+- Backlog list per subject
+- Subject progress bars + totals
+- Countdown, Planner, Mock Tracker, Habits, Analytics retained
+- All data stored locally (browser localStorage)
+*/
+
+// --- Utilities ---
+const fmt = (n) => new Intl.NumberFormat("en-IN").format(n);
+const todayStr = () => new Date().toISOString().slice(0, 10);
+const clamp = (v, min, max) => Math.max(min, Math.min(max, v));
+
+function useLocalStorage(key, initialValue) {
+  const [value, setValue] = useState(() => {
+    try {
+      const item = localStorage.getItem(key);
+      return item ? JSON.parse(item) : initialValue;
+    } catch {
+      return initialValue;
+    }
+  });
+  useEffect(() => {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch {}
+  }, [key, value]);
+  return [value, setValue];
+}
+
+// --- Countdown (fixed to 4 June 2027, 2 PM IST by default) ---
+function useCountdown(targetISO) {
+  const [now, setNow] = useState(Date.now());
+  useEffect(() => { const id = setInterval(() => setNow(Date.now()), 1000); return () => clearInterval(id); }, []);
+  const diff = Math.max(0, new Date(targetISO).getTime() - now);
+  const days = Math.floor(diff / (1000 * 60 * 60 * 24));
+  const hours = Math.floor((diff / (1000 * 60 * 60)) % 24);
+  const minutes = Math.floor((diff / (1000 * 60)) % 60);
+  const seconds = Math.floor((diff / 1000) % 60);
+  return { diff, days, hours, minutes, seconds };
+}
+
+// --- Notifications (4 PM reminder) ---
+function scheduleDailyReminder(hour = 16, minute = 0) {
+  if (!("Notification" in window)) return;
+  if (Notification.permission !== "granted") return;
+  const now = new Date();
+  const next = new Date();
+  next.setHours(hour, minute, 0, 0);
+  if (next <= now) next.setDate(next.getDate() + 1);
+  const ms = next.getTime() - now.getTime();
+  setTimeout(() => { new Notification("NEET Dashboard", { body: "It's 4 PM — daily check-in!", tag: "neet-4pm" }); scheduleDailyReminder(hour, minute); }, ms);
+}
+
+// --- Simple SVG Line Chart ---
+function LineChart({ data, width = 520, height = 180, yLabel = "", xLabel = "" }) {
+  const pad = 32; const innerW = width - pad * 2; const innerH = height - pad * 2;
+  const ys = data.map((d) => d.y); const maxY = Math.max(1, ...ys); const minY = Math.min(0, ...ys);
+  const xStep = innerW / Math.max(1, data.length - 1);
+  const points = data.map((d, i) => { const x = pad + i * xStep; const y = pad + innerH - ((d.y - minY) / (maxY - minY || 1)) * innerH; return `${x},${y}`; });
+  return (
+    <svg viewBox={`0 0 ${width} ${height}`} className="w-full">
+      <rect x={0} y={0} width={width} height={height} rx={16} className="fill-white" />
+      <line x1={pad} y1={pad} x2={pad} y2={height - pad} className="stroke-gray-300" />
+      <line x1={pad} y1={height - pad} x2={width - pad} y2={height - pad} className="stroke-gray-300" />
+      <text x={pad} y={20} className="fill-gray-700 text-xs">{yLabel}</text>
+      <text x={width - pad} y={height - 8} textAnchor="end" className="fill-gray-700 text-xs">{xLabel}</text>
+      {[0.25, 0.5, 0.75].map((t) => (<line key={t} x1={pad} x2={width - pad} y1={pad + (height - pad * 2) * t} y2={pad + (height - pad * 2) * t} className="stroke-gray-200" />))}
+      <polyline points={points.join(" ")} fill="none" className="stroke-blue-500" strokeWidth={2} />
+      {points.map((p, i) => { const [x, y] = p.split(",").map(Number); return <circle key={i} cx={x} cy={y} r={3} className="fill-blue-500" />; })}
+    </svg>
+  );
+}
+
+// --- Syllabus seed (from your screenshot) ---
+const PHYSICS_CHAPTERS = [
+  "Physics & Measurement",
+  "Kinematics",
+  "Laws of Motion",
+  "Work, Energy and Power",
+  "Rotational Motion",
+  "Gravitation",
+  "Properties of Solids and Fluids",
+  "Thermodynamics",
+  "Kinetic Theory of Gases",
+  "Oscillations and Waves",
+];
+
+const BIO_TOPICS = [
+  "Diversity in Living World",
+  "Structural Organisation in Animals and Plants",
+  "Cell Structure and Function",
+  "Plant Physiology",
+  "Human Physiology",
+];
+
+const PHYSICAL_CHEM = [
+  "Some Basic Concepts of Chemistry",
+  "Atomic Structure",
+  "Chemical Thermodynamics",
+  "Equilibrium",
+  "Redox Reactions",
+];
+const ORGANIC_CHEM = [
+  "Some Basic Principles of Organic Chemistry",
+  "Hydrocarbons",
+];
+const INORGANIC_CHEM = [
+  "Classification in Elements and Periodicity in Properties",
+  "Chemical Bonding and Molecular Structure",
+];
+
+const SUBJECTS = [
+  { key: "Physics", name: "Physics", chapters: PHYSICS_CHAPTERS, extraBook: "S.L. Arora" },
+  { key: "Botany", name: "Botany", chapters: BIO_TOPICS, extraBook: null },
+  { key: "Zoology", name: "Zoology", chapters: BIO_TOPICS, extraBook: null },
+  { key: "PhysicalChem", name: "Physical Chem", chapters: PHYSICAL_CHEM, extraBook: "Pradeep's Chemistry" },
+  { key: "OrganicChem", name: "Organic Chem", chapters: ORGANIC_CHEM, extraBook: "Pradeep's Chemistry" },
+  { key: "InorganicChem", name: "Inorganic Chem", chapters: INORGANIC_CHEM, extraBook: "Pradeep's Chemistry" },
+];
+
+const EMPTY_CHECK = { lecture: false, ncert: false, dpp: false, module: false, extra: false };
+
+function makeInitialSyllabus() {
+  const obj = {};
+  SUBJECTS.forEach((s) => {
+    obj[s.key] = {
+      chapters: s.chapters.map((c) => ({ name: c, ...EMPTY_CHECK })),
+      backlog: [],
+    };
+  });
+  return obj;
+}
+
+// --- UI Atoms ---
+const Card = ({ title, right, children }) => (
+  <div className="bg-white rounded-2xl p-5 shadow-sm border border-gray-100">
+    <div className="flex items-center justify-between mb-3">
+      <h3 className="text-lg font-semibold tracking-tight">{title}</h3>
+      {right}
+    </div>
+    {children}
+  </div>
+);
+const Input = ({ className = "", ...props }) => (
+  <input {...props} className={`w-full px-3 py-2 border border-gray-200 rounded-xl focus:outline-none focus:ring-2 focus:ring-blue-400 ${className}`} />
+);
+const Button = ({ children, className = "", ...props }) => (
+  <button {...props} className={`px-3 py-2 rounded-xl bg-blue-600 text-white hover:bg-blue-700 active:scale-[0.99] transition ${className}`}>{children}</button>
+);
+const Badge = ({ children }) => (<span className="text-xs px-2 py-1 rounded-full bg-gray-100 text-gray-700">{children}</span>);
+
+// --- Main App ---
+export default function App() {
+  // Exam date fixed (editable if you want)
+  const [examISO, setExamISO] = useLocalStorage("neet_exam_iso", new Date("2027-06-04T14:00:00+05:30").toISOString());
+  const { days, hours, minutes, seconds } = useCountdown(examISO);
+
+  // Dream college tracker kept
+  const [dream, setDream] = useLocalStorage("dream_college", { name: "AIIMS New Delhi", targetScore: 710, currentBest: 0 });
+
+  // Planner, Mocks, Habits retained
+  const [planner, setPlanner] = useLocalStorage("planner", { [todayStr()]: [] });
+  const [mocks, setMocks] = useLocalStorage("mocks", []);
+  const [habits, setHabits] = useLocalStorage("habits", { h21: { name: "NCERT Bio 60m", start: todayStr(), days: {}, length: 21 }, h100: { name: "Daily PYQs", start: todayStr(), days: {}, length: 100 } });
+
+  // New: syllabus + backlog across 6 subjects
+  const [syllabus, setSyllabus] = useLocalStorage("syllabus_v2", makeInitialSyllabus());
+
+  // Notifications
+  useEffect(() => {
+    if ("Notification" in window && Notification.permission === "default") setTimeout(() => Notification.requestPermission(), 1200);
+    scheduleDailyReminder(16, 0);
+  }, []);
+
+  // Derived analytics
+  const studyHistory = useMemo(() => {
+    const res = [];
+    for (let i = 13; i >= 0; i--) {
+      const d = new Date(); d.setDate(d.getDate() - i);
+      const key = d.toISOString().slice(0, 10);
+      const blocks = planner[key] || [];
+      const mins = blocks.reduce((acc, b) => acc + (b.minutes || 0), 0);
+      res.push({ x: key.slice(5), y: +(mins / 60).toFixed(2) });
+    }
+    return res;
+  }, [planner]);
+
+  const accuracyTrend = useMemo(() => mocks.slice(-12).map((m) => ({ x: m.date.slice(5), y: m.accuracy || 0 })), [mocks]);
+
+  // UI
+  const [tab, setTab] = useState("dashboard");
+  const [subTab, setSubTab] = useState("Physics");
+
+  return (
+    <div className="min-h-screen bg-gradient-to-b from-slate-50 to-slate-100 text-slate-800">
+      <header className="sticky top-0 z-10 backdrop-blur bg-white/70 border-b">
+        <div className="max-w-6xl mx-auto px-4 py-3 flex items-center justify-between">
+          <div className="flex items-center gap-3">
+            <div className="w-9 h-9 rounded-2xl bg-blue-600 text-white grid place-items-center font-bold">N</div>
+            <div>
+              <div className="font-semibold leading-tight">NEET 2027 Dashboard</div>
+              <div className="text-xs text-slate-500">Daily check-in at 4:00 PM (Asia/Kolkata)</div>
+            </div>
+          </div>
+          <div className="flex items-center gap-2">
+            <label className="text-xs text-slate-600 hidden sm:block">Exam date/time</label>
+            <input type="datetime-local" value={new Date(examISO).toISOString().slice(0, 16)} onChange={(e) => setExamISO(new Date(e.target.value).toISOString())} className="px-2 py-1 border rounded-lg" />
+          </div>
+        </div>
+      </header>
+
+      <main className="max-w-6xl mx-auto px-4 py-6">
+        {/* Top counters */}
+        <section className="grid md:grid-cols-2 gap-6 mb-6">
+          <Card title="NEET 2027 Countdown" right={<Badge>{new Date(examISO).toLocaleString()}</Badge>}>
+            <div className="grid grid-cols-4 gap-3 text-center">
+              {[['Days', days], ['Hours', hours], ['Minutes', minutes], ['Seconds', seconds]].map(([label, value]) => (
+                <div key={label} className="bg-slate-50 rounded-xl p-4 border">
+                  <div className="text-4xl font-bold tabular-nums">{value}</div>
+                  <div className="text-xs text-slate-500 mt-1">{label}</div>
+                </div>
+              ))}
+            </div>
+          </Card>
+
+          <Card title="Dream College Tracker" right={<Badge>Set your goal</Badge>}>
+            <div className="grid gap-3">
+              <Input value={dream.name} onChange={(e) => setDream({ ...dream, name: e.target.value })} placeholder="College name (e.g., AIIMS Delhi)" />
+              <div className="grid grid-cols-3 gap-3">
+                <div>
+                  <label className="text-xs text-slate-500">Target Score</label>
+                  <Input type="number" value={dream.targetScore} onChange={(e) => setDream({ ...dream, targetScore: Number(e.target.value) })} />
+                </div>
+                <div>
+                  <label className="text-xs text-slate-500">Current Best Mock</label>
+                  <Input type="number" value={dream.currentBest} onChange={(e) => setDream({ ...dream, currentBest: Number(e.target.value) })} />
+                </div>
+                <div className="flex items-end">
+                  <div className="w-full bg-slate-200 rounded-full h-3">
+                    <div className="bg-green-500 h-3 rounded-full" style={{ width: `${clamp((dream.currentBest / (dream.targetScore || 1)) * 100, 0, 100)}%` }} />
+                  </div>
+                </div>
+              </div>
+              <div className="text-sm text-slate-600">Progress toward {dream.name}: <b>{clamp((dream.currentBest / (dream.targetScore || 1)) * 100, 0, 100).toFixed(1)}%</b></div>
+            </div>
+          </Card>
+        </section>
+
+        {/* Tabs */}
+        <div className="flex gap-2 mb-6 flex-wrap">
+          {[
+            ["dashboard", "Dashboard"],
+            ["syllabus", "Syllabus Tracker"],
+            ["planner", "Planner"],
+            ["progress", "Mocks"],
+            ["habits", "Habits"],
+            ["analytics", "Analytics"],
+            ["about", "About"],
+          ].map(([id, label]) => (
+            <button key={id} onClick={() => setTab(id)} className={`px-3 py-2 rounded-xl border ${tab === id ? "bg-blue-600 text-white border-blue-600" : "bg-white border-slate-200"}`}>{label}</button>
+          ))}
+        </div>
+
+        {tab === "syllabus" && (
+          <section className="grid gap-6">
+            <div className="flex gap-2 flex-wrap">
+              {SUBJECTS.map((s) => (
+                <button key={s.key} onClick={() => setSubTab(s.key)} className={`px-3 py-2 rounded-xl border ${subTab === s.key ? "bg-emerald-600 text-white border-emerald-600" : "bg-white border-slate-200"}`}>{s.name}</button>
+              ))}
+            </div>
+            <SubjectBoard subjectKey={subTab} syllabus={syllabus} setSyllabus={setSyllabus} />
+          </section>
+        )}
+
+        {tab === "planner" && <Planner planner={planner} setPlanner={setPlanner} />}
+        {tab === "progress" && <Mocks mocks={mocks} setMocks={setMocks} />}
+        {tab === "habits" && <Habits habits={habits} setHabits={setHabits} />}
+        {tab === "analytics" && (
+          <section className="grid md:grid-cols-2 gap-6">
+            <Card title="Weekly Study Hours (last 14 days)"><LineChart data={studyHistory} yLabel="Hours" xLabel="Date" /></Card>
+            <Card title="Mock Accuracy Trend (last 12 tests)"><LineChart data={accuracyTrend} yLabel="Accuracy %" xLabel="Test" /></Card>
+          </section>
+        )}
+        {tab === "about" && (
+          <section className="grid gap-4">
+            <Card title="How this works">
+              <ul className="list-disc pl-6 space-y-2 text-sm text-slate-700">
+                <li>All data stays locally in your browser (no server). Use <b>Export via your browser</b> if desired using dev tools later.</li>
+                <li>Exam date set to <b>4 June 2027</b> (editable above).</li>
+                <li>Grant notifications to get a daily 4 PM reminder (tab must be open).</li>
+                <li>Planner entries feed Analytics automatically.</li>
+              </ul>
+            </Card>
+          </section>
+        )}
+      </main>
+
+      <footer className="py-6 text-center text-xs text-slate-500">Made for NEET 2027 • 6-subject syllabus tracker • Data stays in your browser</footer>
+    </div>
+  );
+}
+
+// --- Subject Board (chapters + backlog + progress bars) ---
+function SubjectBoard({ subjectKey, syllabus, setSyllabus }) {
+  const subject = SUBJECTS.find((s) => s.key === subjectKey);
+  const data = syllabus[subjectKey];
+
+  const toggle = (idx, field) => {
+    const next = { ...syllabus };
+    next[subjectKey] = { ...data, chapters: data.chapters.map((c, i) => (i === idx ? { ...c, [field]: !c[field] } : c)) };
+    setSyllabus(next);
+  };
+
+  const moveToBacklog = (idx) => {
+    const chap = data.chapters[idx];
+    const next = { ...syllabus };
+    const rest = data.chapters.filter((_, i) => i !== idx);
+    next[subjectKey] = { ...data, chapters: rest, backlog: [...data.backlog, chap] };
+    setSyllabus(next);
+  };
+
+  const restoreFromBacklog = (idx) => {
+    const item = data.backlog[idx];
+    const next = { ...syllabus };
+    const rest = data.backlog.filter((_, i) => i !== idx);
+    next[subjectKey] = { ...data, chapters: [...data.chapters, item], backlog: rest };
+    setSyllabus(next);
+  };
+
+  const addCustomChapter = () => {
+    const name = prompt("Add chapter/topic name");
+    if (!name) return;
+    const next = { ...syllabus };
+    next[subjectKey] = { ...data, chapters: [...data.chapters, { name, ...EMPTY_CHECK }] };
+    setSyllabus(next);
+  };
+
+  const subjectProgress = useMemo(() => {
+    const totalTasks = data.chapters.length * (subject.extraBook ? 5 : 4);
+    let done = 0;
+    data.chapters.forEach((c) => {
+      done += c.lecture + c.ncert + c.dpp + c.module + (subject.extraBook ? c.extra : 0);
+    });
+    const pct = totalTasks === 0 ? 0 : (done / totalTasks) * 100;
+    return { done, totalTasks, pct };
+  }, [data, subject.extraBook]);
+
+  return (
+    <section className="grid md:grid-cols-2 gap-6">
+      <Card title={`${subject.name} — Chapters`} right={<Badge>{data.chapters.length} items • {subjectProgress.pct.toFixed(1)}%</Badge>}>
+        <div className="w-full bg-slate-200 rounded-full h-2 mb-4">
+          <div className="bg-emerald-500 h-2 rounded-full" style={{ width: `${clamp(subjectProgress.pct, 0, 100)}%` }} />
+        </div>
+        <div className="grid gap-3">
+          {data.chapters.length === 0 && <div className="text-sm text-slate-500">No chapters yet.</div>}
+          {data.chapters.map((c, i) => (
+            <div key={i} className="p-3 rounded-xl border bg-white">
+              <div className="flex items-center justify-between">
+                <div className="font-medium mr-3">{c.name}</div>
+                <button className="text-xs text-rose-600" onClick={() => moveToBacklog(i)}>Backlog</button>
+              </div>
+              <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-5 gap-2 mt-3">
+                <Toggle label="Lecture+Notes" checked={c.lecture} onChange={() => toggle(i, 'lecture')} />
+                <Toggle label="NCERT (SE+BE)" checked={c.ncert} onChange={() => toggle(i, 'ncert')} />
+                <Toggle label="DPP" checked={c.dpp} onChange={() => toggle(i, 'dpp')} />
+                <Toggle label="Module" checked={c.module} onChange={() => toggle(i, 'module')} />
+                {subject.extraBook && (
+                  <Toggle label={subject.extraBook} checked={c.extra} onChange={() => toggle(i, 'extra')} />
+                )}
+              </div>
+            </div>
+          ))}
+          <Button onClick={addCustomChapter}>+ Add Chapter</Button>
+        </div>
+      </Card>
+
+      <Card title={`${subject.name} — Backlog`} right={<Badge>{data.backlog.length} pending</Badge>}>
+        <div className="grid gap-2">
+          {data.backlog.length === 0 && <div className="text-sm text-slate-500">Backlog empty. Great job!</div>}
+          {data.backlog.map((b, i) => (
+            <div key={i} className="flex items-center justify-between p-3 rounded-xl border bg-white">
+              <div className="font-medium">{b.name}</div>
+              <button className="text-xs text-emerald-700" onClick={() => restoreFromBacklog(i)}>Restore</button>
+            </div>
+          ))}
+        </div>
+      </Card>
+    </section>
+  );
+}
+
+const Toggle = ({ label, checked, onChange }) => (
+  <label className={`flex items-center justify-between gap-2 text-sm border rounded-lg px-2 py-1 ${checked ? 'bg-emerald-50 border-emerald-300' : 'bg-white border-slate-200'}`}>
+    <span>{label}</span>
+    <input type="checkbox" checked={!!checked} onChange={onChange} className="w-4 h-4" />
+  </label>
+);
+
+// --- Planner ---
+function Planner({ planner, setPlanner }) {
+  const [date, setDate] = useState(todayStr());
+  const [subject, setSubject] = useState(SUBJECTS[0].name);
+  const [topic, setTopic] = useState("");
+  const [minutes, setMinutes] = useState(60);
+  const blocks = planner[date] || [];
+
+  const addBlock = () => {
+    const newBlock = { id: crypto.randomUUID(), subject, topic, minutes: Number(minutes) };
+    const next = { ...planner, [date]: [...blocks, newBlock] };
+    setPlanner(next); setTopic("");
+  };
+  const removeBlock = (id) => { const next = { ...planner, [date]: blocks.filter((b) => b.id !== id) }; setPlanner(next); };
+  const totalMin = blocks.reduce((a, b) => a + (b.minutes || 0), 0);
+
+  return (
+    <section className="grid md:grid-cols-3 gap-6">
+      <Card title="Add Study Block">
+        <div className="grid gap-3">
+          <div className="grid grid-cols-2 gap-3">
+            <div><label className="text-xs text-slate-500">Date</label><Input type="date" value={date} onChange={(e) => setDate(e.target.value)} /></div>
+            <div>
+              <label className="text-xs text-slate-500">Subject</label>
+              <select 
